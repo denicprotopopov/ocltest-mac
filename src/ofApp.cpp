@@ -3,102 +3,138 @@
 #include <sstream>
 
 std::string loadKernel(const std::string& filename) {
+    // Try to load from the current working directory
     std::ifstream file(filename);
+    
+    // If that fails, try to load from the data directory
     if (!file.is_open()) {
-        throw std::runtime_error("Could not open kernel file: " + filename);
+        std::string dataPath = ofToDataPath(filename);
+        file.open(dataPath);
     }
+    
+    if (!file.is_open()) {
+        throw std::runtime_error("Could not open kernel file: " + filename +
+                                 ". Current working directory: " + ofFilePath::getCurrentWorkingDirectory());
+    }
+    
     std::stringstream buffer;
     buffer << file.rdbuf();
     return buffer.str();
 }
 
 void ofApp::setup() {
-    //ofSetVerticalSync(true);
-    ofSetFrameRate(30);
+//    ofSetFrameRate(30);
 
     setupOpenCL();
 
     // Initialize particles
     particles.resize(numParticles);
     for (auto& p : particles) {
-        p.x = ofRandomWidth();
-        p.y = ofRandomHeight();
+        p.x = ofRandom(ofGetWidth());
+        p.y = ofRandom(ofGetHeight());
         p.vx = ofRandom(-1, 1);
         p.vy = ofRandom(-1, 1);
     }
 
     // Create buffer for particles
-    particleBuffer = cl::Buffer(context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR, sizeof(Particle) * numParticles, particles.data());
+    cl_int err;
+    particleBuffer = clCreateBuffer(context, CL_MEM_READ_WRITE | CL_MEM_COPY_HOST_PTR,
+                                    sizeof(Particle) * numParticles, particles.data(), &err);
+    if (err != CL_SUCCESS) {
+        ofLogError() << "Failed to create particle buffer: " << err;
+    }
 }
 
 void ofApp::setupOpenCL() {
-    try {
-        // Get all platforms (drivers), e.g. NVIDIA, Intel, AMD
-        std::vector<cl::Platform> platforms;
-        cl::Platform::get(&platforms);
+    cl_int err;
 
-        if (platforms.empty()) {
-            throw std::runtime_error("No OpenCL platforms found.");
-        }
-
-        // Get default device of the first platform
-        cl_context_properties properties[] = {
-            CL_CONTEXT_PLATFORM, (cl_context_properties)(platforms[0])(),
-            0
-        };
-        context = cl::Context(CL_DEVICE_TYPE_GPU, properties);
-
-        // Get a list of devices on this platform
-        std::vector<cl::Device> devices = context.getInfo<CL_CONTEXT_DEVICES>();
-
-        if (devices.empty()) {
-            throw std::runtime_error("No OpenCL devices found.");
-        }
-
-        // Create a command queue and use the first device
-        queue = cl::CommandQueue(context, devices[0]);
-
-        // Load kernel code from file
-        std::string kernelCode = loadKernel("moveParticles.cl");
-
-        // Build the kernel code
-        program = cl::Program(context, kernelCode);
-        program.build(devices);
-
-        // Create kernel
-        kernel = cl::Kernel(program, "moveParticles");
-
-        // Log build info
-        std::string buildLog = program.getBuildInfo<CL_PROGRAM_BUILD_LOG>(devices[0]);
-        ofLog() << "Build Log: " << buildLog;
-
+    // Get platform
+    cl_uint numPlatforms;
+    cl_platform_id platform = NULL;
+    err = clGetPlatformIDs(1, &platform, &numPlatforms);
+    if (err != CL_SUCCESS) {
+        ofLogError() << "Failed to get platform ID: " << err;
+        return;
     }
-    catch (std::exception& ex) {
-        ofLog() << "Exception: " << ex.what();
+
+    // Get device
+    cl_device_id device = NULL;
+    err = clGetDeviceIDs(platform, CL_DEVICE_TYPE_GPU, 1, &device, NULL);
+    if (err != CL_SUCCESS) {
+        ofLogError() << "Failed to get device ID: " << err;
+        return;
+    }
+
+    // Create context
+    context = clCreateContext(NULL, 1, &device, NULL, NULL, &err);
+    if (err != CL_SUCCESS) {
+        ofLogError() << "Failed to create context: " << err;
+        return;
+    }
+
+    // Create command queue
+    queue = clCreateCommandQueue(context, device, 0, &err);
+    if (err != CL_SUCCESS) {
+        ofLogError() << "Failed to create command queue: " << err;
+        return;
+    }
+
+    // Load kernel code from file
+    std::string kernelCode = loadKernel("moveParticles.cl");
+    const char* kernelSource = kernelCode.c_str();
+    size_t kernelLength = kernelCode.length();
+
+    // Create program
+    program = clCreateProgramWithSource(context, 1, &kernelSource, &kernelLength, &err);
+    if (err != CL_SUCCESS) {
+        ofLogError() << "Failed to create program: " << err;
+        return;
+    }
+
+    // Build program
+    err = clBuildProgram(program, 1, &device, NULL, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        ofLogError() << "Failed to build program: " << err;
+        size_t logSize;
+        clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, 0, NULL, &logSize);
+        std::vector<char> buildLog(logSize);
+        clGetProgramBuildInfo(program, device, CL_PROGRAM_BUILD_LOG, logSize, buildLog.data(), NULL);
+        ofLogError() << "Build log: " << buildLog.data();
+        return;
+    }
+
+    // Create kernel
+    kernel = clCreateKernel(program, "moveParticles", &err);
+    if (err != CL_SUCCESS) {
+        ofLogError() << "Failed to create kernel: " << err;
+        return;
     }
 }
 
 void ofApp::moveParticles() {
-    try {
-        // Set kernel arguments
-        kernel.setArg(0, particleBuffer);
+    cl_int err;
 
-        // Enqueue kernel execution
-        cl::NDRange global(numParticles);
-        queue.enqueueNDRangeKernel(kernel, cl::NullRange, global, cl::NullRange);
-        queue.finish();
-
-        int* w;
-        //w[p]
-
-        // Read the result back to host
-        queue.enqueueReadBuffer(particleBuffer, CL_FALSE, 0, sizeof(Particle) * numParticles, particles.data());
-
-        // Debug: Print first particle's position to verify movement
-        //ofLog() << "First particle position: (" << particles[0].x << ", " << particles[0].y << ")";
+    // Set kernel arguments
+    err = clSetKernelArg(kernel, 0, sizeof(cl_mem), &particleBuffer);
+    if (err != CL_SUCCESS) {
+        ofLogError() << "Failed to set kernel argument: " << err;
+        return;
     }
-    catch (std::exception& ex) {
-        ofLog() << "Exception: " << ex.what();
+
+    // Enqueue kernel execution
+    size_t globalWorkSize = numParticles;
+    err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL, &globalWorkSize, NULL, 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        ofLogError() << "Failed to enqueue kernel: " << err;
+        return;
+    }
+
+    // Read the result back to host
+    err = clEnqueueReadBuffer(queue, particleBuffer, CL_TRUE, 0,
+                              sizeof(Particle) * numParticles, particles.data(), 0, NULL, NULL);
+    if (err != CL_SUCCESS) {
+        ofLogError() << "Failed to read buffer: " << err;
+        return;
     }
 }
 

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "ofMain.h"
-#include <CL/cl.hpp>
+#include <OpenCL/opencl.h>
 
 struct Particle {
     float x, y;
@@ -17,11 +17,11 @@ public:
     void setupOpenCL();
     void moveParticles();
 
-    cl::Context context;
-    cl::CommandQueue queue;
-    cl::Program program;
-    cl::Kernel kernel;
+    cl_context context;
+    cl_command_queue queue;
+    cl_program program;
+    cl_kernel kernel;
     std::vector<Particle> particles;
-    cl::Buffer particleBuffer;
+    cl_mem particleBuffer;
     const int numParticles = 1000;
 };
